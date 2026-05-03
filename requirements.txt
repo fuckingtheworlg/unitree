@@ -1,0 +1,11 @@
+numpy>=1.24,<2.0
+opencv-python>=4.8,<5.0
+PyYAML>=6.0
+cyclonedds==0.10.2
+
+# RealSense D435i: macOS Apple Silicon 用 cansik 预编译包；Linux/Windows 用官方包
+pyrealsense2-macosx; platform_system == "Darwin"
+pyrealsense2; platform_system == "Linux" or platform_system == "Windows"
+
+# dev
+pytest>=7.0

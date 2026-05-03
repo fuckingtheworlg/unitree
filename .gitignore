@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+.DS_Store
+.idea/
+.vscode/
+
+logs/
+*.log
+*.h264
+tests/data/*.mp4
+tests/data/*.h264
+recordings/
+
+# 离线依赖 (librealsense 源码 + offline pip wheel bundle, ~216MB)
+.deps/
+offline_bundle/
+
+# 输出物
+*.npz
+*.avi
+*.mp4
+*.mov
+*.mkv
+
+# Cursor / IDE
+.cursor/
+*.swp
+*.swo

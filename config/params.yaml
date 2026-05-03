@@ -1,0 +1,166 @@
+network:
+  interface: eth0
+  domain_id: 0
+
+robot:
+  speed_level: 1            # 0=慢 1=正常 2=快, 对应 SportClient.SpeedLevel
+  startup_grace_sec: 1.5
+  stop_grace_sec: 1.0
+  velocity_hz: 20           # 后台 Move spam 频率 (sport_mode 要求 ~20Hz)
+  max_vx: 0.5               # 速度饱和 (m/s), 任何 set_velocity 超过会被夹断
+  max_vy: 0.3
+  max_vyaw: 1.0
+
+camera:
+  width: 1280
+  height: 720
+  fps: 30
+  roi_top_ratio: 0.50         # 切掉天花板/墙/椅子, 只看下半屏地面
+  roi_bottom_ratio: 0.95
+  ipm_src_ratio:
+    tl: [0.30, 0.55]
+    tr: [0.70, 0.55]
+    br: [1.00, 0.95]
+    bl: [0.00, 0.95]
+  ipm_dst_size: [400, 400]
+  fisheye_balance: 0.0
+
+vision:
+  # ⚠ Go2 EDU 前置鱼眼相机色彩特性: 实拍黄色 H≈33 S≈44 V≈240 (偏白的黄色)
+  # 跟手机截图渲染显示的色彩不同, 必须用相机实拍图测出的真实 HSV.
+
+  # ===== 推荐: 多组 HSV 取并集 (覆盖不同光照) =====
+  yellow_hsv_ranges:
+    - [[18, 80, 120], [38, 255, 255]]   # 标准黄
+    - [[15, 20, 180], [40, 110, 255]]   # 强光过曝黄
+    - [[18, 60,  70], [40, 255, 160]]   # 阴影黄
+  # S 下限 30: 兼容偏白的黄色; V 下限 120: 排除暗色 (黑边/阴影).
+  yellow_hsv_lower: [18, 30, 120]
+  yellow_hsv_upper: [38, 255, 255]
+  morph_open_kernel: 3
+  morph_close_kernel: 7
+  min_lane_area_px: 1500
+
+control:
+  loop_hz: 30
+  # ⚠ 注意 Go2 sport_mode 行走启动门槛: vx 必须 >= ~0.2 m/s, 否则只原地踏步.
+  # 所有阶段速度都设到 0.2 以上.
+  forward_speed:
+    follow: 0.30          # 主巡线 (能看清线就够稳)
+    dump_approach: 0.20   # 近倾倒区 (刚好过门槛, 慢但能走)
+    fork: 0.25            # 岔路口
+    stair: 0.20           # 上台阶 (慢且稳)
+    dock: 0.20            # 接近充电区
+  lateral_pid:
+    # 误差已归一化到 [-1, +1], 输出对应 vyaw 角速度 (rad/s).
+    # kp=0.6 配 err=-0.42 -> vyaw=-0.25 rad/s 是温和但有效的转向.
+    # 实测如果转向太激烈请降到 0.4, 太迟钝升到 0.8.
+    kp: 0.6
+    ki: 0.0
+    kd: 0.2
+    out_min: -1.0
+    out_max: 1.0
+    integral_limit: 50
+  lost_lane_timeout_sec: 2.0     # 丢线后多久才进 SEARCH_LANE (大一点避免误触发)
+  lost_lane_search_yaw: 0.5
+  search_lane_max_sec: 8.0       # SEARCH_LANE 状态最长持续, 超时进 EMERGENCY_STOP
+  # 已废弃: 鱼眼广角下黄道几乎永远在视野里, "重现"信号永远成立, 不可用
+  lane_recovered_consecutive_frames: 5
+  lane_recovered_conf_min: 0.5
+  # 地标连续 N 帧消失 = 狗走过去了 (配合 max_prox >= pass_through_min_proximity 使用)
+  landmark_lost_consecutive_frames: 8
+
+landmark:
+  # 倾倒区: 黄色圆环 + 内部白色 + 黑色字
+  dump_min_radius_ratio: 0.10
+  dump_min_area_ratio: 0.02
+  dump_circularity_min: 0.70
+  dump_inner_white_ratio_min: 0.10
+  dump_consecutive_frames: 12
+  dump_proximity_threshold: 0.65     # 当前帧接近度阈值 (要 cy >= 65% AND bbox_h*1.5 >= 65%)
+
+  fork_branch_min_area_ratio: 0.02
+  fork_split_y_ratio: 0.55
+  fork_consecutive_frames: 8         # 提高: 4 -> 8 帧
+
+  # 蓝矩形 (台阶区/充电区/障碍区视觉特征一样, 由 FSM 顺序区分)
+  blue_rect_min_area_ratio: 0.02
+  blue_rect_inner_white_min: 0.20
+
+  stair_consecutive_frames: 12       # 提高: 6 -> 12 帧, 防止远处闪一下就触发
+  stair_climb_duration_sec: 6.0      # 已废弃 (现在用黄道重现退出 APPROACH_STAIR)
+
+  dock_consecutive_frames: 12
+  dock_proximity_threshold: 0.75     # 终点要求更严
+  dock_target_distance_m: 0.3
+
+  # 路程判定: 从第一次 vote 通过 (进入 APPROACH_X) 开始, 按 vx × dt 累加路程.
+  # 走够指定距离就执行对应动作. **赛前现场调整**, 默认值基于赛道 6300×8800mm 估算.
+  dump_walk_distance_m: 1.4          # 看到倾倒区后再走到圆心；太早卸料就调大
+  stair_walk_distance_m: 1.8         # 看到台阶区后再走到两条黄线中间；太早停就调大
+  stair_through_distance_m: 2.5      # 切步态后再走 ~2.5m 穿过台阶 (台阶区约 1.5m + 余量)
+  dock_walk_distance_m: 1.4          # 看到充电区后再走到中心停车；太早停就调大
+
+mission:
+  max_duration_sec: 870
+  emergency_stop_on_exception: true
+
+dump_action:
+  roll_rad: -0.45           # 负=向右倾斜 (物料从右侧滑出). 赛前调幅度 0.3~0.6
+  hold_sec: 2.5             # 倾角保持时间
+  spam_hz: 30               # Euler 命令重发频率 (Euler 单帧生效, 必须 spam)
+
+logging:
+  level: INFO
+  save_video: false
+  save_dir: logs
+
+# ============ D435i 辅助 (装腹下水平朝前) ============
+realsense:
+  enabled: false              # 默认关. --realsense 命令行 启动也可
+  width: 640
+  height: 480
+  fps: 30
+
+  # ---- 触发距离 (米) ----
+  dump_trigger_depth_m: 0.40
+  stair_trigger_depth_m: 0.40
+  dock_trigger_depth_m: 0.40
+
+  n_stable_frames: 5
+  min_hits_in_window: 4
+
+  # ---- 起步保护 + 时间冷却 (用时间不用距离, 命令积分不准) ----
+  startup_protect_s: 3.0
+  cooldown_dump_s: 5.0
+  cooldown_stair_s: 8.0
+  cooldown_dock_s: 8.0
+
+  # ---- dump → stair 时间间隔保护 ----
+  # dump 完成后必须 ≥ N 秒才允许 stair 触发, 防 dump 区附近蓝色误识为 stair.
+  dump_to_stair_min_s: 15.0
+
+  # ---- stair 完成后纯直行 (完全不看黄线 vyaw=0, 等 D435i 终点) ----
+  dock_blind_walk_speed: 0.25         # m/s, ≥0.22 才能起步 (sport_mode 门槛)
+
+  # ---- 颜色判定 (day + night 双档 OR) ----
+  color_stat:
+    roi_w_ratio: 0.60
+    roi_h_ratio: 0.60
+    depth_min_m: 0.05
+    depth_max_m: 0.50
+    min_valid_depth_ratio: 0.30
+    # day 档 (白天明亮场景)
+    white_min_ratio: 0.50
+    black_min_ratio: 0.25
+    blue_min_ratio: 0.08
+    other_max_ratio: 0.20
+    yellow_max_ratio: 0.30
+    # night 档 (灯光下白底变灰)
+    night_enabled: true
+    night_white_min_ratio: 0.35
+    night_black_min_ratio: 0.30
+    night_blue_min_ratio: 0.06
+    night_other_max_ratio_blackwhite: 0.10
+    night_other_max_ratio_bluewhite: 0.25
+    night_blue_dominant_sum: 0.85
