@@ -4,14 +4,16 @@
 INIT
   → STAND_UP
   → FOLLOW_LANE     (默认巡线)
-  → APPROACH_DUMP   (检测到倾倒区: 慢速对中)
+  → FOLLOW_OBSTACLE_RING (起点后障碍区蓝色圆环: 固定右侧沿环带绕行)
+  → FOLLOW_LANE
+  → FOLLOW_DUMP_RING (检测到倾倒区: 沿黄色圆环一侧慢速到动作点)
   → DUMP_ACTION     (执行卸料姿态)
   → FOLLOW_LANE
   → CHOOSE_FORK     (检测到岔路: 选最短/速度最快路径 = 选当前画面里更"直"或者更近的那支)
   → FOLLOW_LANE
   → APPROACH_STAIR  (检测到台阶接近: 切爬楼步态)
   → CLIMB_STAIR     (定时上楼)
-  → APPROACH_DOCK   (检测充电区蓝色矩形)
+  → APPROACH_DOCK   (检测充电区蓝色矩形后继续进区)
   → DOCK            (停车收尾)
   → DONE
 
@@ -32,6 +34,9 @@ class State(str, Enum):
     INIT = "INIT"
     STAND_UP = "STAND_UP"
     FOLLOW_LANE = "FOLLOW_LANE"
+    FOLLOW_OBSTACLE_RING = "FOLLOW_OBSTACLE_RING"
+    AVOID_OBSTACLE = "AVOID_OBSTACLE"
+    FOLLOW_DUMP_RING = "FOLLOW_DUMP_RING"
     APPROACH_DUMP = "APPROACH_DUMP"
     DUMP_ACTION = "DUMP_ACTION"
     CHOOSE_FORK = "CHOOSE_FORK"
@@ -48,6 +53,8 @@ class State(str, Enum):
 class FlowFlags:
     """已经做过哪些不可逆事件，避免反复触发。"""
     dumped: bool = False
+    obstacle_avoided: bool = False
+    blue_ring_done: bool = False
     fork_chosen: bool = False
     stair_climbed: bool = False
 
@@ -59,6 +66,7 @@ class MissionFSM:
         self.entered_at: float = time.time()
         self.log = logger
         self._consecutive_dump = 0
+        self._consecutive_obstacle = 0
         self._consecutive_fork = 0
         self._consecutive_stair = 0
         self._consecutive_dock = 0
@@ -73,6 +81,7 @@ class MissionFSM:
         self.state = new_state
         self.entered_at = time.time()
         self._consecutive_dump = 0
+        self._consecutive_obstacle = 0
         self._consecutive_fork = 0
         self._consecutive_stair = 0
         self._consecutive_dock = 0
@@ -85,6 +94,10 @@ class MissionFSM:
     def vote_dump(self, hit: bool, n_required: int) -> bool:
         self._consecutive_dump = self._consecutive_dump + 1 if hit else 0
         return self._consecutive_dump >= n_required
+
+    def vote_obstacle(self, hit: bool, n_required: int) -> bool:
+        self._consecutive_obstacle = self._consecutive_obstacle + 1 if hit else 0
+        return self._consecutive_obstacle >= n_required
 
     def vote_fork(self, hit: bool, n_required: int) -> bool:
         self._consecutive_fork = self._consecutive_fork + 1 if hit else 0

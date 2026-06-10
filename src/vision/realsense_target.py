@@ -43,6 +43,7 @@ class ColorClassification:
     depth_valid_ratio: float
     n_valid_pixels: int
     roi_bbox: Tuple[int, int, int, int]
+    red_ratio: float = 0.0
     rule_explain: str = ""
 
 
@@ -55,6 +56,15 @@ _HSV_WHITE = ((0, 0, 90), (180, 80, 255))
 _HSV_BLACK = ((0, 0, 0), (180, 255, 80))
 _HSV_BLUE = ((90, 70, 40), (135, 255, 255))
 _HSV_YELLOW = ((15, 70, 90), (40, 255, 255))
+# 红色在 HSV 里跨 0/180 两段, 取并集.
+_HSV_RED1 = ((0, 90, 60), (10, 255, 255))
+_HSV_RED2 = ((170, 90, 60), (180, 255, 255))
+
+
+def _red_mask(hsv: np.ndarray) -> np.ndarray:
+    m1 = cv2.inRange(hsv, np.array(_HSV_RED1[0], np.uint8), np.array(_HSV_RED1[1], np.uint8))
+    m2 = cv2.inRange(hsv, np.array(_HSV_RED2[0], np.uint8), np.array(_HSV_RED2[1], np.uint8))
+    return cv2.bitwise_or(m1, m2)
 
 
 def classify_color_combo(
@@ -82,6 +92,10 @@ def classify_color_combo(
     night_other_max_ratio_bluewhite: float = 0.25,
     night_blue_dominant_sum: float = 0.85,
     yellow_max_ratio: float = 0.30,
+    # ---- 亮度自适应 (只在偏暗时放宽"白"的 V 下限, 亮场不变) ----
+    adaptive_enabled: bool = True,
+    adaptive_white_v_base: float = 90.0,
+    adaptive_v_ref: float = 128.0,
 ) -> ColorClassification:
     """根据画面中央 ROI 像素颜色占比 + depth 过滤, 输出地标 label.
 
@@ -132,37 +146,58 @@ def classify_color_combo(
         )
 
     hsv = cv2.cvtColor(roi_rgb, cv2.COLOR_BGR2HSV)
+
+    # 亮度自适应: 暗场下白色油漆 V 会掉到 ~120, 固定 V>=90 仍能过, 但灯光更暗时
+    # (或反光不足) 会漏判. 这里按 ROI 中位亮度把"白"的 V 下限往下调, 亮场封顶=base
+    # 保持原行为, 不会把灰当白. 黑/蓝/黄保持固定 (色相判定更稳).
+    v_channel = hsv[:, :, 2]
+    if color_pixel_mask is not None and int(np.count_nonzero(color_pixel_mask)) > 0:
+        v_med = float(np.median(v_channel[color_pixel_mask > 0]))
+    else:
+        v_med = float(np.median(v_channel))
+    if adaptive_enabled:
+        white_v_min = int(np.clip(
+            adaptive_white_v_base * (v_med / max(1.0, adaptive_v_ref)),
+            55, adaptive_white_v_base,
+        ))
+    else:
+        white_v_min = int(_HSV_WHITE[0][2])
+    white_lo_arr = np.array((_HSV_WHITE[0][0], _HSV_WHITE[0][1], white_v_min), np.uint8)
+    white_hi_arr = np.array(_HSV_WHITE[1], np.uint8)
+
     if color_pixel_mask is not None:
         hsv_for_stat = hsv.copy()
         hsv_for_stat[color_pixel_mask == 0] = 0
-        white_mask = cv2.inRange(hsv_for_stat,
-            np.array(_HSV_WHITE[0], np.uint8), np.array(_HSV_WHITE[1], np.uint8))
+        white_mask = cv2.inRange(hsv_for_stat, white_lo_arr, white_hi_arr)
         black_mask = cv2.inRange(hsv_for_stat,
             np.array(_HSV_BLACK[0], np.uint8), np.array(_HSV_BLACK[1], np.uint8))
         blue_mask = cv2.inRange(hsv_for_stat,
             np.array(_HSV_BLUE[0], np.uint8), np.array(_HSV_BLUE[1], np.uint8))
         yellow_mask = cv2.inRange(hsv_for_stat,
             np.array(_HSV_YELLOW[0], np.uint8), np.array(_HSV_YELLOW[1], np.uint8))
+        red_mask = _red_mask(hsv_for_stat)
         white_mask = cv2.bitwise_and(white_mask, color_pixel_mask)
         black_mask = cv2.bitwise_and(black_mask, color_pixel_mask)
         blue_mask = cv2.bitwise_and(blue_mask, color_pixel_mask)
         yellow_mask = cv2.bitwise_and(yellow_mask, color_pixel_mask)
+        red_mask = cv2.bitwise_and(red_mask, color_pixel_mask)
         denom = max(1, int(np.count_nonzero(color_pixel_mask)))
     else:
-        white_mask = cv2.inRange(hsv,
-            np.array(_HSV_WHITE[0], np.uint8), np.array(_HSV_WHITE[1], np.uint8))
+        white_mask = cv2.inRange(hsv, white_lo_arr, white_hi_arr)
         black_mask = cv2.inRange(hsv,
             np.array(_HSV_BLACK[0], np.uint8), np.array(_HSV_BLACK[1], np.uint8))
         blue_mask = cv2.inRange(hsv,
             np.array(_HSV_BLUE[0], np.uint8), np.array(_HSV_BLUE[1], np.uint8))
         yellow_mask = cv2.inRange(hsv,
             np.array(_HSV_YELLOW[0], np.uint8), np.array(_HSV_YELLOW[1], np.uint8))
+        red_mask = _red_mask(hsv)
         denom = max(1, hsv.shape[0] * hsv.shape[1])
 
     white_ratio = float(np.count_nonzero(white_mask)) / float(denom)
     black_ratio = float(np.count_nonzero(black_mask)) / float(denom)
     blue_ratio = float(np.count_nonzero(blue_mask)) / float(denom)
     yellow_ratio = float(np.count_nonzero(yellow_mask)) / float(denom)
+    red_ratio = float(np.count_nonzero(red_mask)) / float(denom)
 
     label = ColorLabel.NONE
     confidence = 0.0
@@ -221,6 +256,7 @@ def classify_color_combo(
         depth_valid_ratio=round(depth_valid_ratio, 3),
         n_valid_pixels=int(n_valid),
         roi_bbox=(int(x0), int(y0), int(rw), int(rh)),
+        red_ratio=round(red_ratio, 3),
         rule_explain=explain,
     )
 

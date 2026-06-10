@@ -10,7 +10,8 @@ Go2 EDU 高层运动 + 视频客户端的薄封装 (线程化 Move 版本).
 仅使用 unitree_sdk2_python 官方真实存在的 API (已对照 .deps/ 本地源码核实):
   - SportClient: Init, SetTimeout, BalanceStand, StopMove, StandUp, StandDown,
                  RecoveryStand, Damp, Move, Euler, SpeedLevel, Sit, RiseSit,
-                 Hello, Stretch, ClassicWalk(bool), StaticWalk, TrotRun
+                 Hello, Stretch, Scrape, Pose(bool), ClassicWalk(bool),
+                 CrossStep(bool), StaticWalk, TrotRun
   - VideoClient: Init, SetTimeout, GetImageSample
   - ChannelFactoryInitialize(id, networkInterface)
 
@@ -228,100 +229,103 @@ class Go2Client:
     def stand_up(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("stand_up")
-        with self._sport_lock:
-            self._sport.StandUp()
+        self._call_sport("StandUp")
         time.sleep(1.5)
-        with self._sport_lock:
-            self._sport.BalanceStand()
+        self._call_sport("BalanceStand")
         time.sleep(0.5)
         self._log("StandUp + BalanceStand 完成")
 
     def stand_down(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("stand_down")
-        with self._sport_lock:
-            self._sport.StandDown()
+        self._call_sport("StandDown")
         time.sleep(1.0)
 
     def recovery_stand(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("recovery_stand")
-        with self._sport_lock:
-            self._sport.RecoveryStand()
+        self._call_sport("RecoveryStand")
         time.sleep(1.0)
 
     def balance_stand(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("balance_stand")
-        with self._sport_lock:
-            self._sport.BalanceStand()
+        self._call_sport("BalanceStand")
 
     def damp(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("damp")
-        with self._sport_lock:
-            self._sport.Damp()
+        self._call_sport("Damp")
 
     def set_speed_level(self, level: int) -> None:
         """level 取 0/1/2 三档 (慢/正常/快)."""
         self._require_init()
         if self.dry_run: return self._log_dry(f"set_speed_level({level})")
-        with self._sport_lock:
-            self._sport.SpeedLevel(int(level))
+        self._call_sport("SpeedLevel", int(level))
 
     def euler(self, roll: float, pitch: float, yaw: float) -> None:
         """姿态控制 (rad). 此 API 只生效一帧, 持续调用才能保持姿态.
         ⚠ 调用前必须先 pause_velocity(), 否则会被 Move spam 覆盖."""
         self._require_init()
         if self.dry_run: return
-        with self._sport_lock:
-            self._sport.Euler(float(roll), float(pitch), float(yaw))
+        self._call_sport("Euler", float(roll), float(pitch), float(yaw), warn_nonzero=False)
 
     def sit(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("sit")
-        with self._sport_lock:
-            self._sport.Sit()
+        self._call_sport("Sit")
 
     def rise_sit(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("rise_sit")
-        with self._sport_lock:
-            self._sport.RiseSit()
+        self._call_sport("RiseSit")
 
     def stretch(self) -> None:
         """伸懒腰动作 (前低后高)."""
         self._require_init()
         if self.dry_run: return self._log_dry("stretch")
-        with self._sport_lock:
-            self._sport.Stretch()
+        self._call_sport("Stretch")
 
     def hello(self) -> None:
         self._require_init()
         if self.dry_run: return self._log_dry("hello")
-        with self._sport_lock:
-            self._sport.Hello()
+        self._call_sport("Hello")
+
+    def scrape(self) -> None:
+        """官方 Scrape 预置动作. 是否适合卸料需实测."""
+        self._require_init()
+        if self.dry_run: return self._log_dry("scrape")
+        self._call_sport("Scrape")
+
+    def pose(self, enable: bool) -> None:
+        """切换姿态控制开关. Go2 mcf 下可能不接受, 返回码会记录."""
+        self._require_init()
+        if self.dry_run: return self._log_dry(f"pose({enable})")
+        self._call_sport("Pose", bool(enable))
 
     def classic_walk(self, enable: bool) -> None:
         """切换到 / 退出经典步态 (更稳, 适合上下台阶)."""
         self._require_init()
         if self.dry_run: return self._log_dry(f"classic_walk({enable})")
-        with self._sport_lock:
-            self._sport.ClassicWalk(bool(enable))
+        self._call_sport("ClassicWalk", bool(enable))
+
+    def cross_step(self, enable: bool) -> None:
+        """官方 CrossStep 预置动作. 是否适合卸料需实测."""
+        self._require_init()
+        if self.dry_run: return self._log_dry(f"cross_step({enable})")
+        self._call_sport("CrossStep", bool(enable))
 
     def static_walk(self) -> None:
         """静步行 (更稳但更慢)."""
         self._require_init()
         if self.dry_run: return self._log_dry("static_walk")
-        with self._sport_lock:
-            self._sport.StaticWalk()
+        self._call_sport("StaticWalk")
 
     def trot_run(self) -> None:
         """trot 跑步步态 (高速)."""
         self._require_init()
         if self.dry_run: return self._log_dry("trot_run")
-        with self._sport_lock:
-            self._sport.TrotRun()
+        self._call_sport("TrotRun")
 
     # -------- 视频 --------
 
@@ -343,6 +347,19 @@ class Go2Client:
     def _log_dry(self, action: str) -> None:
         if self.log is not None:
             self.log.debug("[dry_run] %s noop", action)
+
+    def _call_sport(self, method: str, *args, warn_nonzero: bool = True):
+        """调用 SportClient API 并记录非 0 返回码.
+
+        官方高层 API 多数会返回 code。之前忽略返回码会把"命令被 mcf/固件拒绝"
+        伪装成动作执行成功, 不利于现场排障。
+        """
+        with self._sport_lock:
+            fn = getattr(self._sport, method)
+            code = fn(*args)
+        if warn_nonzero and code not in (None, 0):
+            self._log("SportClient.%s%r return code=%s", method, args, code)
+        return code
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:

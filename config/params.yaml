@@ -37,6 +37,15 @@ vision:
   # S 下限 30: 兼容偏白的黄色; V 下限 120: 排除暗色 (黑边/阴影).
   yellow_hsv_lower: [18, 30, 120]
   yellow_hsv_upper: [38, 255, 255]
+  # 光线变化补偿: 白蓝地标进入画面会拉动自动曝光/白平衡, 让黄线变低饱和或偏暗.
+  # 固定 HSV 先跑; adaptive 只做兜底, 用宽 hue + LAB 黄色通道 + BGR 黄色优势防漏检.
+  yellow_adaptive_enabled: true
+  yellow_adaptive_h_range: [12, 48]
+  yellow_adaptive_s_min: 12
+  yellow_adaptive_v_min: 45
+  yellow_adaptive_lab_b_min: 138
+  yellow_adaptive_lab_b_delta: 8
+  yellow_adaptive_rg_delta_min: 12
   morph_open_kernel: 3
   morph_close_kernel: 7
   min_lane_area_px: 1500
@@ -49,6 +58,7 @@ control:
     follow: 0.30          # 主巡线 (能看清线就够稳)
     dump_approach: 0.20   # 近倾倒区 (刚好过门槛, 慢但能走)
     fork: 0.25            # 岔路口
+    obstacle: 0.22        # 起点障碍区蓝色矩形标记右绕
     stair: 0.20           # 上台阶 (慢且稳)
     dock: 0.20            # 接近充电区
   lateral_pid:
@@ -77,7 +87,18 @@ landmark:
   dump_circularity_min: 0.70
   dump_inner_white_ratio_min: 0.10
   dump_consecutive_frames: 12
-  dump_proximity_threshold: 0.65     # 当前帧接近度阈值 (要 cy >= 65% AND bbox_h*1.5 >= 65%)
+  dump_proximity_threshold: 0.58     # 当前帧接近度阈值; 降低后避免黄圆环一直"看到但太远"
+  dump_require_obstacle_done: true   # 比赛顺序保护: 避障完成前禁止倾倒, 防起点黑白误触发
+  dump_fisheye_backup_enabled: false # 倾倒区入口以 D435i 黑白为准; 鱼眼黄环不直接触发卸料
+  dump_ring_side: lower              # 倾倒区沿黄色圆环哪一侧走: lower/upper/left/right
+  dump_ring_speed: 0.20              # 沿倾倒圆环慢速前进
+  dump_ring_min_follow_sec: 1.0      # 进入圆环后至少走多久才允许卸料
+  dump_ring_min_follow_distance_m: 0.25 # 命令积分辅助, 不作真实里程
+  dump_ring_max_sec: 8.0             # 圆环跟随最长时间, 防止卡住
+  dump_ring_blackwhite_min_confidence: 0.50 # 仅用于记录是否扫到中心黑白字, 不作为倾倒必要条件
+  dump_ring_band_ratio: 0.24
+  dump_ring_n_strips: 6
+  dump_ring_min_pixels_per_strip: 20
 
   fork_branch_min_area_ratio: 0.02
   fork_split_y_ratio: 0.55
@@ -87,11 +108,55 @@ landmark:
   blue_rect_min_area_ratio: 0.02
   blue_rect_inner_white_min: 0.20
 
+  # 起点后障碍区: 蓝色圆环是可走路线, 白色内区/黑字区不可碰; 固定从右侧沿蓝环绕行.
+  obstacle_enabled: true
+  obstacle_consecutive_frames: 8
+  obstacle_ring_enabled: true
+  obstacle_ring_direction: right
+  obstacle_ring_speed: 0.20
+  obstacle_ring_yaw_gain: 0.65
+  obstacle_ring_exit_yellow_frames: 8
+  obstacle_ring_exit_yellow_conf_min: 0.45
+  obstacle_ring_lost_frames: 10
+  obstacle_ring_max_sec: 18.0
+  blue_ring_min_area_ratio: 0.012
+  blue_ring_min_circularity: 0.45
+  blue_ring_inner_white_min: 0.25
+  blue_ring_inner_black_min: 0.01
+  blue_ring_min_confidence: 0.45
+
+  # ---- 避障区脚本化动作 ----
+  # 蓝色只负责进入避障区; 进入后用 D435i 红色识别切换直行/左转阶段.
+  # 起步后 realsense.startup_protect_s (默认 3s) 才激活避障识别.
+  # 序列: 蓝色进入 -> 右转90° -> 直行见红 -> 左转90° -> 直行见红
+  #   -> 左转90° -> 直行3s -> 右转90° -> 循黄线.
+  obstacle_ring_mode: scripted   # scripted=脚本序列; follow=旧的沿蓝环巡线
+  obstacle_seq_use_red: true     # true=直行时等红色触发转弯; false=写死时间
+  obstacle_seq_turn_yaw: 0.6     # 转向角速度幅值 (rad/s); 右转取负, 左转取正
+  obstacle_seq_turn_vx: 0.0      # 转向时前进速度 (0=原地转, 转角更准)
+  obstacle_seq_straight_vx: 0.22 # 直行速度 (≥0.2 才能起步)
+  obstacle_seq_turn90_sec: 2.6   # 转 90° 用时 ≈ (pi/2)/turn_yaw, 现场标定到刚好90°
+  obstacle_seq_right90_sec: 2.6
+  obstacle_seq_left90a_sec: 2.6
+  obstacle_seq_left90b_sec: 2.6
+  obstacle_seq_right_final_sec: 2.6
+  obstacle_seq_straight1_sec: 2.2     # use_red=false 时才使用; true 时由红色触发
+  obstacle_seq_straight2_sec: 3.0     # use_red=false 时才使用; true 时由红色触发
+  obstacle_seq_straight3_sec: 3.0     # 第二次左转后固定直行时间
+  obstacle_seq_strafe_after_straight3_sec: 0.0 # 颜色识别模式默认不横移
+  obstacle_seq_strafe_vy: 0.0
+  obstacle_seq_final_forward_sec: 0.0
+  obstacle_seq_straight_grace_sec: 0.6  # 直行进入后多久才允许被红色触发 (防误触发)
+  obstacle_seq_red_consecutive: 3       # 红色连续命中帧数才算稳定
+  obstacle_seq_phase_max_sec: 8.0       # straight1/straight2 等红色最长时间, 防止盲走
+  obstacle_seq_max_sec: 32.0            # 整段避障最长时间, 超时强制退出
+
   stair_consecutive_frames: 12       # 提高: 6 -> 12 帧, 防止远处闪一下就触发
+  stair_proximity_threshold: 0.72     # 蓝色台阶区必须足够近才触发爬楼
   stair_climb_duration_sec: 6.0      # 已废弃 (现在用黄道重现退出 APPROACH_STAIR)
 
   dock_consecutive_frames: 12
-  dock_proximity_threshold: 0.75     # 终点要求更严
+  dock_proximity_threshold: 0.82     # 终点要求更严, 防止远处看到蓝框就停车
   dock_target_distance_m: 0.3
 
   # 路程判定: 从第一次 vote 通过 (进入 APPROACH_X) 开始, 按 vx × dt 累加路程.
@@ -106,8 +171,14 @@ mission:
   emergency_stop_on_exception: true
 
 dump_action:
+  # Go2 EDU 实测: mcf 下 Euler 不生效, ReleaseMode(mcf) 会失去支撑.
+  # 比赛最终采用前后方向倒料: sit_rise = 前腿伸直/基本不变,
+  # 后腿跪下保持, 再起身恢复. 物料出口请布置到后方.
+  # 可选: stretch / sit_rise / scrape / cross_step / pose_stretch / euler
+  method: sit_rise
+  repeat: 1
   roll_rad: -0.45           # 负=向右倾斜 (物料从右侧滑出). 赛前调幅度 0.3~0.6
-  hold_sec: 2.5             # 倾角保持时间
+  hold_sec: 3.5             # sit_rise=后腿跪下保持时间; euler=倾角保持时间
   spam_hz: 30               # Euler 命令重发频率 (Euler 单帧生效, 必须 spam)
 
 logging:
@@ -115,17 +186,22 @@ logging:
   save_video: false
   save_dir: logs
 
-# ============ D435i 辅助 (装腹下水平朝前) ============
+# ============ D435i 辅助 (加装在底部/腹下) ============
 realsense:
-  enabled: false              # 默认关. --realsense 命令行 启动也可
+  enabled: true               # 默认启用加装 D435i: 地标/障碍触发走颜色+深度; 鱼眼只巡黄线
   width: 640
   height: 480
   fps: 30
 
   # ---- 触发距离 (米) ----
+  obstacle_trigger_depth_m: 0.40
   dump_trigger_depth_m: 0.40
   stair_trigger_depth_m: 0.40
   dock_trigger_depth_m: 0.40
+
+  # ---- 避障区脚本的红色识别 (D435i 中央 ROI) ----
+  obstacle_red_min_ratio: 0.15      # 红色像素占比 >= 此值算"看到红"
+  obstacle_red_trigger_depth_m: 0.60 # 红色目标深度 <= 此值 (或深度无效) 才算数
 
   n_stable_frames: 5
   min_hits_in_window: 4
@@ -133,18 +209,69 @@ realsense:
   # ---- 起步保护 + 时间冷却 (用时间不用距离, 命令积分不准) ----
   startup_protect_s: 3.0
   cooldown_dump_s: 5.0
+  cooldown_obstacle_s: 5.0
   cooldown_stair_s: 8.0
   cooldown_dock_s: 8.0
 
   # ---- dump → stair 时间间隔保护 ----
-  # dump 完成后必须 ≥ N 秒才允许 stair 触发, 防 dump 区附近蓝色误识为 stair.
-  dump_to_stair_min_s: 15.0
+  # 当前策略: D435i 识别到白蓝台阶区就直接切爬楼, 不再做固定时间等待.
+  dump_to_stair_min_s: 0.0
+
+  # ---- D435i 触发后的动作点微调 ----
+  # 倾倒区: D435i 看到黑白区后直接卸料; 以下旧后移参数保留但当前不使用.
+  dump_post_trigger_distance_m: 0.45
+  dump_post_trigger_timeout_s: 8.0
+
+  # 终点: 起点和终点都是蓝白区域, 但只有 stair_climbed=true 后才会解释为终点.
+  # D435i 看到终点蓝白区后, 再纯直行一小段让机身投影更进入充电区域.
+  dock_post_trigger_distance_m: 0.55
+  dock_post_trigger_timeout_s: 5.0
 
   # ---- stair 完成后纯直行 (完全不看黄线 vyaw=0, 等 D435i 终点) ----
   dock_blind_walk_speed: 0.25         # m/s, ≥0.22 才能起步 (sport_mode 门槛)
+  dock_post_stair_settle_sec: 0.8     # 台阶后先停稳, 再进入终点直行锁定
+
+  # 台阶穿越期间的 vyaw 限幅 (弧度/秒).
+  # 0 = 穿台阶纯直行完全不转向 (推荐, 省赛翻车点: 台阶上看到右侧黄线被带歪).
+  # >0 = 允许微小修正, 比如 0.08.
+  stair_cross_max_yaw: 0.0
+
+  # ---- 底部黄线兜底 ----
+  # 前置鱼眼仍是主巡线; 只有前置黄线丢失/低置信时, 底部 D435i 才短时接管纠偏.
+  lane_assist:
+    enabled: true
+    front_confidence_min: 0.45
+    bottom_confidence_min: 0.35
+    fallback_speed: 0.20              # D435i 兜底时限速, 防止脚下视角反应太晚
+    yaw_scale: 0.65                   # D435i 兜底时降低转向增益, 防抖
+    error_sign: 1.0                   # 若实测左右反了, 改成 -1.0
+    roi_w_ratio: 0.80
+    roi_h_ratio: 0.70                 # 取底部画面靠下区域
+    depth_min_m: 0.05
+    depth_max_m: 0.50
+    min_depth_valid_ratio: 0.10
+    min_yellow_ratio: 0.015
+    n_strips: 6
+    min_pixels_per_strip: 30
+
+  blue_ring_assist:
+    enabled: true
+    min_confidence: 0.35
+    roi_w_ratio: 0.90
+    roi_h_ratio: 0.80
+    depth_min_m: 0.05
+    depth_max_m: 0.55
+    min_depth_valid_ratio: 0.08
+    min_blue_ratio: 0.010
+    n_strips: 6
+    min_pixels_per_strip: 20
 
   # ---- 颜色判定 (day + night 双档 OR) ----
   color_stat:
+    # 亮度自适应: 偏暗时自动降低"白"的 V 下限, 亮场封顶=base 保持原行为.
+    adaptive_enabled: true
+    adaptive_white_v_base: 90    # 白色 V 下限基准 (亮场用这个值)
+    adaptive_v_ref: 128          # 参考亮度; ROI 中位亮度低于它就按比例放宽白阈值
     roi_w_ratio: 0.60
     roi_h_ratio: 0.60
     depth_min_m: 0.05

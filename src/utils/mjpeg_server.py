@@ -1,4 +1,4 @@
-"""极简 MJPEG HTTP server 用于 Mac 浏览器实时看狗端 debug 画面."""
+"""极简 MJPEG HTTP server 用于 Mac 浏览器实时看狗端识别画面."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -19,19 +19,29 @@ _INDEX_HTML = b"""<!doctype html>
   body { margin:0; background:#111; color:#eee; font-family:sans-serif; }
   .wrap { padding:8px; }
   .meta { font-size:12px; color:#aaa; padding:4px 0; }
-  img { display:block; max-width:100%; height:auto; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap:10px; }
+  .card { background:#181818; border:1px solid #333; padding:6px; }
+  .title { font-size:14px; color:#fff; margin-bottom:4px; }
+  img { display:block; width:100%; height:auto; }
 </style></head>
 <body><div class='wrap'>
-  <div class='meta'>Go2 Patrol live stream</div>
-  <img src='/stream' />
+  <div class='meta'>Go2 Patrol live streams: /debug /front /realsense</div>
+  <div class='grid'>
+    <div class='card'><div class='title'>debug combined</div><img src='/debug' /></div>
+    <div class='card'><div class='title'>front fisheye recognition</div><img src='/front' /></div>
+    <div class='card'><div class='title'>D435i recognition</div><img src='/realsense' /></div>
+  </div>
 </div></body></html>
 """
 
 
 class _State:
     lock = threading.Lock()
-    latest_jpeg: Optional[bytes] = None
-    last_update_ts: float = 0.0
+    streams: Dict[str, Tuple[Optional[bytes], float]] = {
+        "debug": (None, 0.0),
+        "front": (None, 0.0),
+        "realsense": (None, 0.0),
+    }
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -41,7 +51,8 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self) -> None:
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -50,9 +61,13 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(_INDEX_HTML)
             return
 
-        if self.path.startswith("/snapshot"):
+        if path.startswith("/snapshot"):
+            stream = "debug"
+            parts = [p for p in path.split("/") if p]
+            if len(parts) >= 2:
+                stream = _normalize_stream_name(parts[1])
             with _State.lock:
-                jpeg = _State.latest_jpeg
+                jpeg, _ = _State.streams.get(stream, (None, 0.0))
             if jpeg is None:
                 self.send_error(503, "no frame yet")
                 return
@@ -64,7 +79,8 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(jpeg)
             return
 
-        if self.path != "/stream":
+        stream = _path_to_stream(path)
+        if stream is None:
             self.send_error(404)
             return
 
@@ -81,8 +97,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             while True:
                 with _State.lock:
-                    jpeg = _State.latest_jpeg
-                    ts = _State.last_update_ts
+                    jpeg, ts = _State.streams.get(stream, (None, 0.0))
                 if jpeg is None or ts <= last_sent_ts:
                     time.sleep(0.02)
                     continue
@@ -99,6 +114,25 @@ class _Handler(BaseHTTPRequestHandler):
                     return
         except Exception:
             return
+
+
+def _normalize_stream_name(name: str) -> str:
+    name = (name or "debug").strip("/").lower()
+    if name in ("stream", "debug"):
+        return "debug"
+    if name in ("front", "fisheye"):
+        return "front"
+    if name in ("realsense", "rs", "d435i"):
+        return "realsense"
+    return name
+
+
+def _path_to_stream(path: str) -> Optional[str]:
+    if path == "/stream":
+        return "debug"
+    if path in ("/debug", "/front", "/realsense"):
+        return _normalize_stream_name(path)
+    return None
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -136,9 +170,10 @@ class MjpegServer:
             pass
         self._httpd = None
 
-    def push_frame(self, img: np.ndarray) -> None:
+    def push_frame(self, img: np.ndarray, stream: str = "debug") -> None:
         if img is None:
             return
+        stream = _normalize_stream_name(stream)
         out = img
         if self.max_width > 0 and img.shape[1] > self.max_width:
             ratio = self.max_width / float(img.shape[1])
@@ -153,5 +188,4 @@ class MjpegServer:
         if not ok:
             return
         with _State.lock:
-            _State.latest_jpeg = buf.tobytes()
-            _State.last_update_ts = time.monotonic()
+            _State.streams[stream] = (buf.tobytes(), time.monotonic())

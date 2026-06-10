@@ -30,6 +30,7 @@ class LandmarkType(Enum):
     DUMP_ZONE = "dump_zone"      # 黄色圆环
     FORK = "fork"                # Y 型分叉
     BLUE_RECT = "blue_rect"      # 蓝矩形 (台阶或充电, 由 FSM 顺序决定)
+    BLUE_RING_OBSTACLE = "blue_ring_obstacle"
     STAIR = "stair"
     DOCK_AREA = "dock_area"
 
@@ -237,6 +238,112 @@ def detect_blue_rect(
     return best
 
 
+def detect_blue_obstacle_ring(
+    bgr: np.ndarray,
+    min_area_ratio: float = 0.015,
+    min_circularity: float = 0.45,
+    min_aspect: float = 0.65,
+    max_aspect: float = 1.55,
+    ring_blue_min: float = 0.16,
+    inner_white_min: float = 0.25,
+    inner_black_min: float = 0.01,
+    close_kernel: int = 9,
+) -> Optional[LandmarkDetection]:
+    """障碍区: 蓝色圆环 + 白色内区 + 黑色"障碍区"字样.
+
+    与蓝色矩形终点/台阶区不同, 这里要求外形接近圆/椭圆, 且内区有
+    白底和少量黑字。返回的 right_band_x 可用于固定右绕时瞄准右侧蓝环。
+    """
+    h, w = bgr.shape[:2]
+    if h < 20 or w < 20:
+        return None
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    blue = cv2.inRange(hsv, _BLUE_HSV_LOWER, _BLUE_HSV_UPPER)
+    white = cv2.inRange(hsv, _WHITE_HSV_LOWER, _WHITE_HSV_UPPER)
+    black = cv2.inRange(hsv, np.array([0, 0, 0], np.uint8), np.array([180, 80, 90], np.uint8))
+
+    if close_kernel > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel))
+        blue_work = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, k)
+    else:
+        blue_work = blue
+
+    contours, _ = cv2.findContours(blue_work, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    img_area = float(h * w)
+    best: Optional[LandmarkDetection] = None
+
+    yy, xx = np.indices((h, w))
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < min_area_ratio * img_area:
+            continue
+        peri = cv2.arcLength(c, True)
+        if peri <= 1.0:
+            continue
+        circularity = float(4.0 * np.pi * area / (peri * peri))
+        if circularity < min_circularity:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(c)
+        if bw <= 0 or bh <= 0:
+            continue
+        aspect = bw / float(bh)
+        if aspect < min_aspect or aspect > max_aspect:
+            continue
+
+        (cx, cy), radius = cv2.minEnclosingCircle(c)
+        if radius <= 5:
+            continue
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        inner_mask = dist <= radius * 0.55
+        ring_mask = (dist >= radius * 0.55) & (dist <= radius * 1.05)
+        if not np.any(inner_mask) or not np.any(ring_mask):
+            continue
+
+        ring_blue = float(np.count_nonzero((blue > 0) & ring_mask)) / float(np.count_nonzero(ring_mask))
+        inner_white = float(np.count_nonzero((white > 0) & inner_mask)) / float(np.count_nonzero(inner_mask))
+        inner_black = float(np.count_nonzero((black > 0) & inner_mask)) / float(np.count_nonzero(inner_mask))
+        if ring_blue < ring_blue_min:
+            continue
+        if inner_white < inner_white_min or inner_black < inner_black_min:
+            continue
+
+        confidence = float(min(
+            1.0,
+            0.35 * min(1.0, ring_blue / max(ring_blue_min, 1e-6))
+            + 0.35 * min(1.0, inner_white / max(inner_white_min, 1e-6))
+            + 0.20 * min(1.0, inner_black / max(inner_black_min * 4.0, 1e-6))
+            + 0.10 * min(1.0, circularity / 0.80),
+        ))
+        right_band_x = min(float(w - 1), cx + radius * 0.65)
+        left_band_x = max(0.0, cx - radius * 0.65)
+        det = LandmarkDetection(
+            type=LandmarkType.BLUE_RING_OBSTACLE,
+            confidence=confidence,
+            bbox=(x, y, bw, bh),
+            extra={
+                "center": (float(cx), float(cy)),
+                "radius": float(radius),
+                "circularity": float(circularity),
+                "aspect": float(aspect),
+                "ring_blue": float(ring_blue),
+                "inner_white": float(inner_white),
+                "inner_black": float(inner_black),
+                "right_band_x": float(right_band_x),
+                "left_band_x": float(left_band_x),
+                "image_w": int(w),
+            },
+        )
+        if best is None or det.confidence > best.confidence:
+            best = det
+
+    return best
+
+
 def detect_dock_area(bgr: np.ndarray, **kwargs) -> Optional[LandmarkDetection]:
     """充电区: 跟台阶区视觉特征一样, 由 FSM 顺序决定语义.
     返回类型标记为 DOCK_AREA, 调用方根据 stair_climbed 标志重新解释."""
@@ -304,5 +411,10 @@ def detect_fork(
         type=LandmarkType.FORK,
         confidence=float(min(1.0, gap / w / 0.5)),
         bbox=(int(left_x), 0, int(right_x - left_x), int(h * upper_band_ratio)),
-        extra={"left_x": float(left_x), "right_x": float(right_x), "gap_px": float(gap)},
+        extra={
+            "left_x": float(left_x),
+            "right_x": float(right_x),
+            "gap_px": float(gap),
+            "image_w": int(w),
+        },
     )
