@@ -22,7 +22,9 @@ def yellow_mask(
     close_kernel: int = 7,
     ranges: Optional[List[Tuple[Tuple[int, int, int], Tuple[int, int, int]]]] = None,
     adaptive: bool = True,
-    adaptive_h_range: Tuple[int, int] = (12, 48),
+    # ⚠ hue 下限 24: 木地板 H 16~23 (暖色木纹), 赛道黄 H≈28.
+    # 旧值 (12,48) 会让 adaptive 分支把整片木地板吞为黄线 (国赛场地实测).
+    adaptive_h_range: Tuple[int, int] = (24, 40),
     adaptive_s_min: int = 12,
     adaptive_v_min: int = 45,
     adaptive_lab_b_min: int = 138,
