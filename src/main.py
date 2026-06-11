@@ -57,7 +57,7 @@ from src.vision.realsense_target import (
 )
 from src.vision.realsense_lane import estimate_bottom_blue_ring_lane, estimate_bottom_yellow_lane
 from src.vision.undistort import IPMConfig, IPMTransformer
-from src.vision.yellow_mask import crop_roi, yellow_mask
+from src.vision.yellow_mask import crop_roi, yellow_mask, yellow_mask_lab
 
 try:
     from src.vision.realsense_camera import RealsenseCamera, RealsenseFrame
@@ -614,26 +614,38 @@ class MissionRunner:
             float(cfg.camera.roi_top_ratio),
             float(cfg.camera.roi_bottom_ratio),
         )
-        # 优先用 yellow_hsv_ranges 多组并集 (覆盖不同光照).
-        ranges_cfg = getattr(cfg.vision, "yellow_hsv_ranges", None)
-        ranges_arg = None
-        if ranges_cfg:
-            ranges_arg = [(tuple(it[0]), tuple(it[1])) for it in ranges_cfg]
-        mask_roi = yellow_mask(
-            roi,
-            lower_hsv=tuple(cfg.vision.yellow_hsv_lower) if ranges_arg is None else None,
-            upper_hsv=tuple(cfg.vision.yellow_hsv_upper) if ranges_arg is None else None,
-            ranges=ranges_arg,
-            open_kernel=int(cfg.vision.morph_open_kernel),
-            close_kernel=int(cfg.vision.morph_close_kernel),
-            adaptive=bool(getattr(cfg.vision, "yellow_adaptive_enabled", True)),
-            adaptive_h_range=tuple(getattr(cfg.vision, "yellow_adaptive_h_range", [12, 48])),
-            adaptive_s_min=int(getattr(cfg.vision, "yellow_adaptive_s_min", 12)),
-            adaptive_v_min=int(getattr(cfg.vision, "yellow_adaptive_v_min", 45)),
-            adaptive_lab_b_min=int(getattr(cfg.vision, "yellow_adaptive_lab_b_min", 138)),
-            adaptive_lab_b_delta=int(getattr(cfg.vision, "yellow_adaptive_lab_b_delta", 8)),
-            adaptive_rg_delta_min=int(getattr(cfg.vision, "yellow_adaptive_rg_delta_min", 12)),
-        )
+        # 黄线检测器: yaml lane_detector 切换 hsv (绝对阈值) / lab (光照自适应)
+        detector = str(getattr(cfg.vision, "lane_detector", "hsv")).lower()
+        if detector == "lab":
+            mask_roi = yellow_mask_lab(
+                roi,
+                open_kernel=int(cfg.vision.morph_open_kernel),
+                close_kernel=int(cfg.vision.morph_close_kernel),
+                b_delta_min=int(getattr(cfg.vision, "lab_b_delta_min", 22)),
+                hue_range=tuple(getattr(cfg.vision, "lab_hue_range", [20, 40])),
+                v_min=int(getattr(cfg.vision, "lab_v_min", 60)),
+                rg_delta_min=int(getattr(cfg.vision, "lab_rg_delta_min", 25)),
+            )
+        else:
+            ranges_cfg = getattr(cfg.vision, "yellow_hsv_ranges", None)
+            ranges_arg = None
+            if ranges_cfg:
+                ranges_arg = [(tuple(it[0]), tuple(it[1])) for it in ranges_cfg]
+            mask_roi = yellow_mask(
+                roi,
+                lower_hsv=tuple(cfg.vision.yellow_hsv_lower) if ranges_arg is None else None,
+                upper_hsv=tuple(cfg.vision.yellow_hsv_upper) if ranges_arg is None else None,
+                ranges=ranges_arg,
+                open_kernel=int(cfg.vision.morph_open_kernel),
+                close_kernel=int(cfg.vision.morph_close_kernel),
+                adaptive=bool(getattr(cfg.vision, "yellow_adaptive_enabled", True)),
+                adaptive_h_range=tuple(getattr(cfg.vision, "yellow_adaptive_h_range", [24, 40])),
+                adaptive_s_min=int(getattr(cfg.vision, "yellow_adaptive_s_min", 12)),
+                adaptive_v_min=int(getattr(cfg.vision, "yellow_adaptive_v_min", 45)),
+                adaptive_lab_b_min=int(getattr(cfg.vision, "yellow_adaptive_lab_b_min", 138)),
+                adaptive_lab_b_delta=int(getattr(cfg.vision, "yellow_adaptive_lab_b_delta", 8)),
+                adaptive_rg_delta_min=int(getattr(cfg.vision, "yellow_adaptive_rg_delta_min", 25)),
+            )
         # 巡线在 ROI mask 上跑 (不再 warp, 否则黄道在 ROI 中上部会被 IPM 扔出画面).
         mask = mask_roi
         warped = self.ipm.warp(roi)  # 仅用于可视化

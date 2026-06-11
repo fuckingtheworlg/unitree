@@ -45,13 +45,24 @@ vision:
   yellow_hsv_upper: [38, 255, 255]
   # 光线变化补偿: 白蓝地标进入画面会拉动自动曝光/白平衡, 让黄线变低饱和或偏暗.
   # 固定 HSV 先跑; adaptive 只做兜底, 用宽 hue + LAB 黄色通道 + BGR 黄色优势防漏检.
+  # ⚠ h_range 必须 ≥24: 木地板 H 16~32, 否则 adaptive 分支整片吞地板.
+  # (此处 yaml 会覆盖 yellow_mask.py 的函数默认值, 两边都要对!)
   yellow_adaptive_enabled: true
-  yellow_adaptive_h_range: [12, 48]
+  yellow_adaptive_h_range: [24, 40]
   yellow_adaptive_s_min: 12
   yellow_adaptive_v_min: 45
   yellow_adaptive_lab_b_min: 138
   yellow_adaptive_lab_b_delta: 8
-  yellow_adaptive_rg_delta_min: 12
+  yellow_adaptive_rg_delta_min: 25
+
+  # ===== 黄线检测器切换 (现场可一键换) =====
+  # hsv = 多组绝对 HSV 阈值 (默认, 省赛验证过)
+  # lab = LAB 相对阈值 (光照自适应, 未知场地灯光时切这个)
+  lane_detector: hsv
+  lab_b_delta_min: 22          # LAB: b - median(b) ≥ 此值 (黄道实测 +40~80, 地板 +3~12)
+  lab_hue_range: [20, 40]
+  lab_v_min: 60
+  lab_rg_delta_min: 25         # min(R,G)-B ≥ 此值 (黄道 80+, 地板 19~39)
   morph_open_kernel: 3
   morph_close_kernel: 7
   min_lane_area_px: 1500
@@ -293,7 +304,9 @@ realsense:
     night_enabled: true
     night_white_min_ratio: 0.35
     night_black_min_ratio: 0.30
-    night_blue_min_ratio: 0.06
+    # ⚠ 0.06 太松: 国赛白色垫边+淡蓝阴影 b=0.06 正好压线误触发 stair (实拍快照证实).
+    # 0.12 为临时值, 待狗鼻贴国赛台阶牌实测后精调.
+    night_blue_min_ratio: 0.12
     night_other_max_ratio_blackwhite: 0.10
     night_other_max_ratio_bluewhite: 0.25
     night_blue_dominant_sum: 0.85

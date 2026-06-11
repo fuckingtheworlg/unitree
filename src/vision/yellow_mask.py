@@ -124,6 +124,59 @@ def _adaptive_yellow_mask(
     return (soft_yellow.astype(np.uint8) * 255)
 
 
+def yellow_mask_lab(
+    bgr: np.ndarray,
+    open_kernel: int = 3,
+    close_kernel: int = 7,
+    *,
+    b_delta_min: int = 22,
+    hue_range: Tuple[int, int] = (20, 40),
+    v_min: int = 60,
+    rg_delta_min: int = 25,
+) -> np.ndarray:
+    """光照自适应黄线检测 (LAB 相对阈值版).
+
+    原理: LAB 的 b 通道 = "黄-蓝"色度, 受亮度影响小. 用
+        黄线得分 = b(像素) - median(b(画面))  >= b_delta_min
+    做主判定 -- 灯光整体变亮变暗时中位数跟着变, 差值不变, 天然抗光照.
+
+    再用两个轻量 gate 防误判:
+      - hue gate: H 必须在黄色区 (排除红/绿对 b 的干扰)
+      - rg gate: min(R,G)-B >= rg_delta_min (黄色的 RGB 本质特征)
+
+    阈值依据 (3 场地实测):
+      木地板:  b-median ≈ +3~+12,  rg_delta 19~39
+      赛道黄:  b-median ≈ +40~+80, rg_delta 80+
+    """
+    if bgr is None or bgr.size == 0:
+        return np.zeros((1, 1), dtype=np.uint8)
+
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    lab_b = lab[:, :, 2].astype(np.int16)
+    b_med = int(np.median(lab_b))
+    score_ok = (lab_b - b_med) >= b_delta_min
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h_lo, h_hi = hue_range
+    hue_ok = (hsv[:, :, 0] >= h_lo) & (hsv[:, :, 0] <= h_hi)
+    v_ok = hsv[:, :, 2] >= v_min
+
+    b_ch = bgr[:, :, 0].astype(np.int16)
+    g_ch = bgr[:, :, 1].astype(np.int16)
+    r_ch = bgr[:, :, 2].astype(np.int16)
+    rg_ok = (np.minimum(r_ch, g_ch) - b_ch) >= rg_delta_min
+
+    mask = (score_ok & hue_ok & v_ok & rg_ok).astype(np.uint8) * 255
+
+    if open_kernel > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_kernel, open_kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    if close_kernel > 1:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_kernel, close_kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    return mask
+
+
 def crop_roi(image: np.ndarray, top_ratio: float, bottom_ratio: float) -> Tuple[np.ndarray, int]:
     """裁掉天花板/天空, 只看前下方道路区域. 返回 (roi, y_offset)."""
     h = image.shape[0]
