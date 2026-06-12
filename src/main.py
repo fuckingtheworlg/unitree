@@ -107,6 +107,7 @@ class MissionRunner:
         self._obstacle_phase: Optional[str] = None
         self._obstacle_phase_t: float = 0.0
         self._obstacle_red_count: int = 0
+        self._obstacle_yellow_count: int = 0
         self._cmd_vy: float = 0.0
 
         pid_cfg = cfg.control.lateral_pid
@@ -1349,133 +1350,89 @@ class MissionRunner:
         return 0.0, 0.0
 
     def _obstacle_scripted_step(self, lane: LaneResult):
-        """避障区脚本化动作 (蓝色进入后, 内部可纯定时):
-        识别到蓝色进入 ->
-        right90:   右转 90°            -> straight1
-        straight1: 直行, 定时/见红 -> left90a
-        left90a:   左转 90°            -> straight2
-        straight2: 直行, 定时/见红 -> left90b
-        left90b:   左转 90°            -> straight3
-        straight3: 直行                -> 可选 strafe_right
-        strafe_right: 横向右移          -> right_final
-        right_final: 右转 90°          -> 可选 final_forward -> 退出循黄线
-        转弯角度靠 (turn_yaw × 时间) 近似, 现场用 obstacle_seq_turn90_sec 标定.
+        """避障区脚本化动作 (看到蓝色进入后, 纯定时 4 段可配序列).
+
+        序列: seg1 -> seg2 -> seg3 -> seg4 -> 收尾(看黄线退出)
+        每段在 yaml 配: obstacle_seq_segN_turn (left/right/none) + obstacle_seq_segN_sec
+          turn=none : 直行 (straight_vx)
+          turn=left : 左转 (原地或带 vx, +turn_yaw)
+          turn=right: 右转 (-turn_yaw)
+          sec=0     : 跳过该段
+        4 段走完进收尾段: exit_on_yellow=True 则继续直行到看见黄线才退出循线,
+          否则直接退出. 全程纯定时不依赖颜色, 不会卡死; max_sec 总超时兜底.
+        现场用遥控器试出每段方向/秒数, 填 yaml 即可, 不用改代码.
         """
         cfg = self.cfg
-        cls = self._last_color_cls
         self._cmd_vy = 0.0
+        if not hasattr(self, "_obstacle_yellow_count"):
+            self._obstacle_yellow_count = 0
         turn_yaw = float(getattr(cfg.landmark, "obstacle_seq_turn_yaw", 0.6))
         turn_vx = float(getattr(cfg.landmark, "obstacle_seq_turn_vx", 0.0))
         straight_vx = float(getattr(cfg.landmark, "obstacle_seq_straight_vx", 0.22))
-        turn90_sec = float(getattr(cfg.landmark, "obstacle_seq_turn90_sec", 2.6))
-        right90_sec = float(getattr(cfg.landmark, "obstacle_seq_right90_sec", turn90_sec))
-        left90a_sec = float(getattr(cfg.landmark, "obstacle_seq_left90a_sec", turn90_sec))
-        left90b_sec = float(getattr(cfg.landmark, "obstacle_seq_left90b_sec", turn90_sec))
-        right_final_sec = float(getattr(cfg.landmark, "obstacle_seq_right_final_sec", turn90_sec))
-        straight1_sec = float(getattr(cfg.landmark, "obstacle_seq_straight1_sec", 2.2))
-        straight2_sec = float(getattr(cfg.landmark, "obstacle_seq_straight2_sec", 3.0))
-        straight3_sec = float(getattr(cfg.landmark, "obstacle_seq_straight3_sec", 3.0))
-        strafe_sec = float(getattr(cfg.landmark, "obstacle_seq_strafe_after_straight3_sec", 0.0))
-        strafe_vy = float(getattr(cfg.landmark, "obstacle_seq_strafe_vy", 0.0))
-        final_forward_sec = float(getattr(cfg.landmark, "obstacle_seq_final_forward_sec", 0.0))
-        use_red = bool(getattr(cfg.landmark, "obstacle_seq_use_red", True))
-        grace = float(getattr(cfg.landmark, "obstacle_seq_straight_grace_sec", 0.6))
-        phase_max_sec = float(getattr(cfg.landmark, "obstacle_seq_phase_max_sec", 8.0))
-        max_sec = float(getattr(cfg.landmark, "obstacle_seq_max_sec", 40.0))
+        max_sec = float(getattr(cfg.landmark, "obstacle_seq_max_sec", 30.0))
+        exit_on_yellow = bool(getattr(cfg.landmark, "obstacle_seq_exit_on_yellow", True))
+        exit_yellow_conf = float(getattr(cfg.landmark, "obstacle_seq_exit_yellow_conf", 0.5))
+        exit_yellow_frames = int(getattr(cfg.landmark, "obstacle_seq_exit_yellow_frames", 4))
+        exit_max_sec = float(getattr(cfg.landmark, "obstacle_seq_exit_max_sec", 8.0))
+
+        # 从 yaml 读 4 段配置, sec>0 才生效
+        segs = []
+        for i in (1, 2, 3, 4):
+            turn = str(getattr(cfg.landmark, "obstacle_seq_seg%d_turn" % i, "none")).lower()
+            sec = float(getattr(cfg.landmark, "obstacle_seq_seg%d_sec" % i, 0.0))
+            if sec > 0.0:
+                segs.append(("seg%d" % i, turn, sec))
+        segs.append(("exit_straight", "none", 0.0))  # 收尾段
+        names = [s[0] for s in segs]
+
+        def _vel(turn):
+            if turn == "left":
+                return turn_vx, turn_yaw
+            if turn == "right":
+                return turn_vx, -turn_yaw
+            return straight_vx, 0.0
 
         now = time.time()
         if not self._obstacle_seq_active:
             self._obstacle_seq_active = True
-            self._obstacle_phase = "right90"
+            self._obstacle_phase = names[0]
             self._obstacle_phase_t = now
-            self._obstacle_red_count = 0
-            mode = "red-trigger" if use_red else "timed"
-            self.log.info("[OBSTACLE_SEQ] 进入避障区: 右转90° (mode=%s)", mode)
+            self._obstacle_yellow_count = 0
+            self.log.info("[OBSTACLE_SEQ] 进入避障区, 序列=%s",
+                          ["%s:%s:%.1fs" % (n, t, s) for n, t, s in segs[:-1]])
 
         if (now - self.fsm.entered_at) > max_sec:
-            self.log.warning("[OBSTACLE_SEQ] 超时 %.1fs, 强制退出避障区", max_sec)
+            self.log.warning("[OBSTACLE_SEQ] 总超时 %.1fs, 强制退出", max_sec)
             return self._exit_obstacle_seq(lane)
 
-        red = self._obstacle_red_hit(cls) if use_red else False
         phase = self._obstacle_phase
         el = now - self._obstacle_phase_t
+        idx = names.index(phase) if phase in names else len(segs) - 1
 
-        if use_red and phase == "straight1" and el > phase_max_sec:
-            self.log.warning(
-                "[OBSTACLE_SEQ] %s 等红色超时 %.1fs, 退出避障区恢复循黄线",
-                phase, phase_max_sec,
-            )
-            return self._exit_obstacle_seq(lane)
-        if use_red and phase == "straight2" and el > phase_max_sec:
-            self.log.warning(
-                "[OBSTACLE_SEQ] straight2 等红色超时 %.1fs, 继续执行左转/直行/右转收尾",
-                phase_max_sec,
-            )
-            self._obstacle_phase = "left90b"
-            self._obstacle_phase_t = now
-            self._obstacle_red_count = 0
-            return turn_vx, turn_yaw
-
-        def _to(name: str) -> None:
-            self._obstacle_phase = name
-            self._obstacle_phase_t = now
-            self._obstacle_red_count = 0
-            self.log.info("[OBSTACLE_SEQ] %s -> %s (red_ratio=%.2f)",
-                          phase, name, float(getattr(cls, "red_ratio", 0.0)) if cls else 0.0)
-
-        if phase == "right90":
-            if el >= right90_sec:
-                _to("straight1")
-                return straight_vx, 0.0
-            return turn_vx, -turn_yaw
-        if phase == "straight1":
-            if (not use_red and el >= straight1_sec) or (use_red and el >= grace and red):
-                _to("left90a")
-                return turn_vx, turn_yaw
-            return straight_vx, 0.0
-        if phase == "left90a":
-            if el >= left90a_sec:
-                _to("straight2")
-                return straight_vx, 0.0
-            return turn_vx, turn_yaw
-        if phase == "straight2":
-            if (not use_red and el >= straight2_sec) or (use_red and el >= grace and red):
-                _to("left90b")
-                return turn_vx, turn_yaw
-            return straight_vx, 0.0
-        if phase == "left90b":
-            if el >= left90b_sec:
-                _to("straight3")
-                return straight_vx, 0.0
-            return turn_vx, turn_yaw
-        if phase == "straight3":
-            if el >= straight3_sec:
-                if strafe_sec > 0.0 and abs(strafe_vy) > 1e-6:
-                    _to("strafe_right")
-                    self._cmd_vy = strafe_vy
-                    return 0.0, 0.0
-                _to("right_final")
-                return turn_vx, -turn_yaw
-            return straight_vx, 0.0
-        if phase == "strafe_right":
-            self._cmd_vy = strafe_vy
-            if el >= strafe_sec:
-                self._cmd_vy = 0.0
-                _to("right_final")
-                return turn_vx, -turn_yaw
-            return 0.0, 0.0
-        if phase == "right_final":
-            if el >= right_final_sec:
-                if final_forward_sec > 0.0:
-                    _to("final_forward")
-                    return straight_vx, 0.0
+        # 收尾段: 看黄线退出 (或直接退出)
+        if phase == "exit_straight":
+            if not exit_on_yellow:
                 return self._exit_obstacle_seq(lane)
-            return turn_vx, -turn_yaw
-        if phase == "final_forward":
-            if el >= final_forward_sec:
+            yellow_ok = lane.found and lane.confidence >= exit_yellow_conf
+            self._obstacle_yellow_count = self._obstacle_yellow_count + 1 if yellow_ok else 0
+            if self._obstacle_yellow_count >= exit_yellow_frames:
+                self.log.info("[OBSTACLE_SEQ] 见黄线, 退出避障区循黄线")
+                return self._exit_obstacle_seq(lane)
+            if el > exit_max_sec:
+                self.log.warning("[OBSTACLE_SEQ] 收尾等黄线超时 %.1fs, 强制退出", exit_max_sec)
                 return self._exit_obstacle_seq(lane)
             return straight_vx, 0.0
-        return self._exit_obstacle_seq(lane)
+
+        # 普通段: 走够 sec 切下一段
+        name, turn, sec = segs[idx]
+        if el >= sec:
+            nxt = names[idx + 1]
+            self._obstacle_phase = nxt
+            self._obstacle_phase_t = now
+            self._obstacle_yellow_count = 0
+            self.log.info("[OBSTACLE_SEQ] %s -> %s", name, nxt)
+            return _vel(segs[idx + 1][1]) if nxt != "exit_straight" else (straight_vx, 0.0)
+        return _vel(turn)
 
     def _blue_ring_hit(self, blue_ring) -> bool:
         min_conf = float(getattr(self.cfg.landmark, "blue_ring_min_confidence", 0.45))
