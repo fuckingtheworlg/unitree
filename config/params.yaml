@@ -142,33 +142,28 @@ landmark:
   blue_ring_inner_black_min: 0.01
   blue_ring_min_confidence: 0.45
 
-  # ---- 避障区脚本化动作 (纯定时 4 段, 现场遥控试好填这里) ----
-  # 看到蓝色进入避障区后, 按 seg1→seg2→seg3→seg4→收尾 顺序走.
-  # 每段: obstacle_seq_segN_turn = left/right/none (none=直行); _sec = 该段秒数(0=跳过).
-  # 收尾段: obstacle_seq_exit_on_yellow=true 则一直直行到看见黄线才退出循线.
-  # 全程纯定时不依赖颜色, 不会卡死. max_sec 总超时兜底.
-  #
-  # 默认猜测: 右转90 → 直行2.5s → 右转90 → 直行2.5s → 见黄线退出.
-  # 【现场标定步骤】遥控狗在避障区走一遍正确路线, 记下每段方向+秒数, 改下面数字.
+  # ---- 避障区脚本 (D435i 全程, 颜色触发转弯) ----
+  # 序列(参考系=狗头朝向):
+  #   看到蓝色进入 → 右转90°(定时) → 直行(脚下见红)→ 左转90° → 沿蓝线直行(再见红)
+  #   → 左转90° → 避障结束, 切鱼眼循黄线
+  # 转弯定时(turn90_sec), 直行靠 D435i 看到红色触发(等红超时也会强制转, 不卡死).
+  # 转弯方向(turn1/2/3_dir)/秒数现场遥控标定后改这里.
   obstacle_ring_mode: scripted   # scripted=脚本序列; follow=旧的沿蓝环巡线
   obstacle_seq_turn_yaw: 0.6     # 转向角速度 (rad/s)
   obstacle_seq_turn_vx: 0.0      # 转向时前进速度 (0=原地转, 转角更准)
   obstacle_seq_straight_vx: 0.25 # 直行速度 (≥0.22 才能起步走)
-
-  obstacle_seq_seg1_turn: right  # 第1段: 右转
-  obstacle_seq_seg1_sec: 2.6     #   转 90° 用时, 现场标到刚好转 90 度
-  obstacle_seq_seg2_turn: none   # 第2段: 直行
-  obstacle_seq_seg2_sec: 2.5
-  obstacle_seq_seg3_turn: right  # 第3段: 再右转
-  obstacle_seq_seg3_sec: 2.6
-  obstacle_seq_seg4_turn: none   # 第4段: 直行
-  obstacle_seq_seg4_sec: 2.5
-
-  obstacle_seq_exit_on_yellow: true   # 收尾: 直行到看见黄线才退出循线
-  obstacle_seq_exit_yellow_conf: 0.45 # 黄线置信度门槛
-  obstacle_seq_exit_yellow_frames: 4  # 连续几帧见黄线才算稳
-  obstacle_seq_exit_max_sec: 8.0      # 收尾等黄线最长时间, 超时也退出
-  obstacle_seq_max_sec: 35.0          # 整段避障最长时间, 超时强制退出
+  obstacle_seq_turn90_sec: 2.6   # 转 90° 用时, 现场标到刚好 90 度 (统一)
+  # 如需每次转弯单独不同秒数, 取消注释覆盖:
+  # obstacle_seq_turn1_sec: 2.6
+  # obstacle_seq_turn2_sec: 2.6
+  # obstacle_seq_turn3_sec: 2.6
+  obstacle_seq_turn1_dir: right  # 第1次转弯方向 (看到蓝色后)
+  obstacle_seq_turn2_dir: left   # 第2次 (第1次见红后)
+  obstacle_seq_turn3_dir: left   # 第3次 (第2次见红后, 转完结束)
+  obstacle_seq_straight_grace_sec: 0.8    # 直行进入后多久才响应红色(防上段残留红误触发)
+  obstacle_seq_straight_red_max_sec: 25.0 # 直行等红最长时间, 超时也强制转(不退出避障)
+  obstacle_seq_red_consecutive: 3         # 红色连续命中帧数才算稳定
+  obstacle_seq_max_sec: 40.0              # 整段避障最长时间, 超时强制退出
 
   stair_consecutive_frames: 12       # 提高: 6 -> 12 帧, 防止远处闪一下就触发
   stair_proximity_threshold: 0.72     # 蓝色台阶区必须足够近才触发爬楼
