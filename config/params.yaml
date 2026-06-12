@@ -309,4 +309,4 @@ realsense:
     night_blue_min_ratio: 0.12
     night_other_max_ratio_blackwhite: 0.10
     night_other_max_ratio_bluewhite: 0.25
-    night_blue_dominant_sum: 0.85
+    night_blue_dominant_sum: 0.70  # 国赛白底蓝牌 D435i 渲染偏青(白算不进white), 靠蓝占比触发: dock实测0.78 stair0.86
